@@ -1,102 +1,70 @@
-# Install required libraries
-#!pip install mediapipe opencv-python
-
-# Import necessary libraries
 import cv2
-import mediapipe as mp
 import numpy as np
+import mediapipe as mp
+import requests
 
-# Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
+# Flask backend URL
+API_URL = "http://127.0.0.1:5000/predict"
+
+# MediaPipe Holistic
+mp_holistic = mp.solutions.holistic
 mp_drawing = mp.solutions.drawing_utils
 
-# Initialize the Hands solution
-hands = mp_hands.Hands(
-    static_image_mode=False,        # For real-time video, keep this False
-    max_num_hands=2,                # Detect up to 2 hands
-    min_detection_confidence=0.5,   # Minimum confidence for hand detection
-    min_tracking_confidence=0.5     # Minimum confidence for tracking
-)
+def live_stream_and_send_to_backend():
+    cap = cv2.VideoCapture(0)
+    prediction = "..."
+    sequence = []
 
-# Function to calculate the distance between two points
-def calculate_distance(point1, point2):
-    return np.sqrt((point1.x - point2.x)**2 + (point1.y - point2.y)**2)
+    with mp_holistic.Holistic(static_image_mode=False) as holistic:
+        while True:
+            ret, frame_bgr = cap.read()
+            if not ret:
+                break
 
-# Function to recognize gestures
-def recognize_gesture(hand_landmarks):
-    # Extract key landmarks
-    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+            h, w, _ = frame_bgr.shape
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            results = holistic.process(frame_rgb)
 
-    # Example Gesture: "Thumbs Up"
-    thumb_distance = calculate_distance(thumb_tip, wrist)
-    index_distance = calculate_distance(index_tip, wrist)
+            # Use webcam frame as background
+            annotated_frame = frame_bgr.copy()
 
-    if thumb_distance > index_distance * 1.5:
-        return "Thumbs Up"
+            # Draw landmarks (hands + pose) on webcam background
+            if results.pose_landmarks:
+                mp_drawing.draw_landmarks(annotated_frame, results.pose_landmarks, mp_holistic.POSE_CONNECTIONS)
+            if results.left_hand_landmarks:
+                mp_drawing.draw_landmarks(annotated_frame, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
+            if results.right_hand_landmarks:
+                mp_drawing.draw_landmarks(annotated_frame, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
 
-    # Example Gesture: "Open Palm" (all fingers extended)
-    if all(hand_landmarks.landmark[f].y < wrist.y for f in [
-        mp_hands.HandLandmark.INDEX_FINGER_TIP,
-        mp_hands.HandLandmark.MIDDLE_FINGER_TIP,
-        mp_hands.HandLandmark.RING_FINGER_TIP,
-        mp_hands.HandLandmark.PINKY_TIP
-    ]):
-        return "Open Palm"
+            # Resize and normalize
+            skeleton_resized = cv2.resize(annotated_frame, (224, 224))
+            skeleton_normalized = skeleton_resized.astype("float32") / 255.0
+            sequence.append(skeleton_normalized)
 
-    return "Unknown Gesture"
+            # When 30 frames collected, send to Flask backend
+            if len(sequence) == 30:
+                try:
+                    payload = {
+                        "frames": np.expand_dims(sequence, axis=0).tolist()  # Shape: (1, 30, 224, 224, 3)
+                    }
+                    response = requests.post(API_URL, json=payload)
+                    result = response.json()
+                    prediction = result.get("word") or result.get("message", "...")
+                except Exception as e:
+                    prediction = f"Error: {str(e)}"
+                sequence.clear()
 
-# Open the webcam
-cap = cv2.VideoCapture(0)  # 0 is the default camera
+            # Display live prediction
+            cv2.putText(annotated_frame, f"Prediction: {prediction}", (10, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-# Check if the webcam is opened successfully
-if not cap.isOpened():
-    print("Error: Could not open the webcam.")
-else:
-    print("Webcam opened. Press 'q' to quit.")
+            cv2.imshow("Sign Recognition (Flask Backend)", annotated_frame)
 
-# Real-time video loop
-try:
-    while cap.isOpened():
-        ret, frame = cap.read()  # Read a frame from the webcam
-        if not ret:
-            print("Error: Could not read a frame.")
-            break
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
-        # Convert the frame to RGB (MediaPipe requires RGB images)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Process the frame with MediaPipe Hands
-        results = hands.process(frame_rgb)
-
-        # Draw hand landmarks and recognize gestures
-        if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                mp_drawing.draw_landmarks(
-                    frame, hand_landmarks, mp_hands.HAND_CONNECTIONS
-                )
-
-                # Recognize gesture
-                gesture = recognize_gesture(hand_landmarks)
-                cv2.putText(
-                    frame, f"Gesture: {gesture}", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA
-                )
-
-        # Display the frame with landmarks and gesture
-        cv2.imshow('Real-Time Gesture Recognition', frame)
-
-        # Break the loop if 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-except Exception as e:
-    print(f"Error: {str(e)}")
-
-# Release resources
-finally:
     cap.release()
     cv2.destroyAllWindows()
-    hands.close()
+
+if __name__ == "__main__":
+    live_stream_and_send_to_backend()
